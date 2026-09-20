@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Enquête infrastructures – Cotonou</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+html,body{height:100%;margin:0;font-family:system-ui,sans-serif}
+#map{height:100%}
+#bar{position:fixed;left:8px;bottom:8px;z-index:1000;display:flex;gap:6px}
+button{font-size:15px;padding:10px 12px;border:0;border-radius:8px;background:#1a73e8;color:#fff}
+button.g{background:#5f6368}button.r{background:#d93025}
+#hint{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:1000;background:#202124;color:#fff;padding:8px 12px;border-radius:8px;display:none;gap:8px;align-items:center}
+#sheet{position:fixed;left:0;right:0;bottom:0;max-height:88vh;overflow:auto;background:#fff;z-index:1100;padding:14px;border-radius:14px 14px 0 0;box-shadow:0 -4px 16px #0005;display:none}
+#sheet label{display:block;margin:10px 0 3px;font-size:13px;color:#444}
+#sheet input:not([type=checkbox]),#sheet select,#sheet textarea{width:100%;box-sizing:border-box;font-size:16px;padding:8px}
+#sheet input[type=checkbox]{width:auto}
+#sheet img{max-width:100%;margin-top:6px;border-radius:6px}
+.row{display:flex;gap:8px;margin-top:14px}.row button{flex:1}
+</style></head><body>
+<div id="map"></div>
+<div id="bar"><button id="add">➕ Ajouter</button><button id="loc" class="g">📍</button><button id="exp" class="g">⬇ Export QGIS</button></div>
+<div id="hint"><span id="hintTxt"></span><button id="hintOk" class="g" style="padding:4px 8px">Terminer</button><button id="hintNo" class="r" style="padding:4px 8px">✕</button></div>
+<div id="sheet"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const CATS={voirie:['Voirie','#e67e22'],assainissement:['Assainissement','#2980b9'],eclairage:['Éclairage public','#d4ac0d'],
+ point_eau:["Point d'eau",'#16a085'],marche_place:['Marché / place publique','#8e44ad'],sante:['Centre de santé','#e74c3c'],education:['Établissement scolaire','#34495e']};
+const LINES=['voirie','assainissement'];
+const ETAT=['Bon','Dégradé','Hors service'],ON=['Oui','Non'];
+const F=(k,l,t='text',o)=>({k,l,t,o});
+const etab=t=>[F('nom',"Nom de l'établissement"),F('type','Type','select',t),F('etat','État général de la structure','select',ETAT),
+ F('date_construction','Date de construction','dateinc'),F('acces_saison','Accès routier praticable en toute saison','select',ON)];
+const FIELDS={
+ voirie:[F('nom','Nom ou code de la voie'),F('revetement','Type de revêtement','select',['Bitume','Pavé','Terre']),F('largeur','Largeur de la voie (m)','number'),
+  F('etat','État de la chaussée','select',ETAT),F('date_service','Date de mise en service','dateinc'),F('obs','Observations','textarea')],
+ assainissement:[F('nom','Identifiant du caniveau / collecteur'),F('type_ouvrage',"Type d'ouvrage",'select',['Ouvert','Recouvert','Enterré']),
+  F('section','Profondeur ou section estimée (m)','number'),F('obstruction',"Niveau d'obstruction",'select',['Aucun','Partiel','Critique']),
+  F('etat','État de la structure','select',['Bon','Fissuré','Effondré']),F('date_curage','Date du dernier curage ou entretien','dateinc')],
+ eclairage:[F('type_lampe','Type de lampe','select',['LED','Solaire','Sodium','Autre']),F('energie',"Source d'énergie",'select',['Réseau SBEE','Solaire autonome','Autre']),
+  F('etat_nuit',"État constaté à la tombée de la nuit",'select',['Fonctionnel','Clignotant','En panne','Point absent']),F('hauteur','Hauteur du mât (m)','number'),
+  F('date_install',"Date d'installation",'dateinc'),F('riverain','Un riverain a-t-il été interrogé ? (Guide 2-A)','select',ON)],
+ point_eau:[F('type_pe',"Type de point d'eau",'select',['Borne-fontaine','Forage','Robinet public']),F('source',"Source d'approvisionnement",'select',['SONEB','Forage privé','Autre']),
+  F('etat','État','select',['Fonctionnel','Hors service']),F('debit','Débit estimé','select',['Fort','Moyen','Faible','Nul'])],
+ marche_place:[F('nom','Nom du marché ou de la place'),F('type','Type','select',['Marché couvert','Marché ouvert','Place publique']),F('etat','État général des infrastructures','select',ETAT),
+  F('eclairage_proche',"Présence d'éclairage à proximité",'select',ON),F('assain_proche',"Présence d'assainissement à proximité",'select',ON),F('eau_proche',"Présence d'un point d'eau à proximité",'select',ON)],
+ sante:etab(['Centre de santé','Autre']),
+ education:etab(['École primaire','École secondaire','Établissement universitaire'])};
+let Q={};fetch('data/quartiers.json').then(r=>r.json()).then(j=>Q=j).catch(()=>{});
+
+let CODE=localStorage.code||'',REC={},FEAT={},POS=null,pending=null;
+const $=id=>document.getElementById(id);
+async function api(p,o={},retry=true){
+  o.headers={'Content-Type':'application/json','X-Code':CODE,...(o.headers||{})};
+  const r=await fetch(p,o);
+  if(r.status===401&&retry){CODE=prompt("Code d'accès de l'enquête :")||'';localStorage.code=CODE;return api(p,o,false)}
+  return r}
+
+// ---- carte
+const map=L.map('map',{zoomControl:false}).setView([6.37,2.43],12);
+L.control.zoom({position:'topleft'}).addTo(map);
+const osm=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+const sat=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Imagerie © Esri'});
+const canvas=L.canvas({padding:.5,tolerance:12});
+const GRP={};for(const c in CATS)GRP[c]=L.layerGroup().addTo(map);
+const overlays={};for(const c in CATS)overlays[`<span style="color:${CATS[c][1]}">●</span> ${CATS[c][0]}`]=GRP[c];
+L.control.layers({'Plan OpenStreetMap':osm,'Satellite':sat},overlays,{collapsed:true}).addTo(map);
+fetch('data/cotonou.json').then(r=>r.json()).then(j=>L.geoJSON(j,{style:{color:'#000',weight:2,fill:false},interactive:false}).addTo(map).bringToBack());
+
+const style=(c,done,line)=>line?{renderer:canvas,color:done?'#1e8e3e':CATS[c][1],weight:done?5:3}
+ :{renderer:canvas,radius:7,color:done?'#1e8e3e':'#fff',weight:done?3:1.5,fillColor:done?'#34a853':CATS[c][1],fillOpacity:.95};
+function mk(c,key,geom,base){
+  const line=LINES.includes(c);
+  const l=L.geoJSON({type:'Feature',geometry:geom},{pointToLayer:(f,ll)=>L.circleMarker(ll,style(c,!!REC[key])),style:()=>style(c,!!REC[key],true)}).getLayers()[0];
+  l.on('click',e=>{L.DomEvent.stopPropagation(e);if(!pending)openForm(c,key,base||{},key.startsWith('new-'))});
+  GRP[c].addLayer(l);FEAT[key]={l,c,line}}
+function restyle(){for(const k in FEAT){const f=FEAT[k];f.l.setStyle(style(f.c,!!REC[k],f.line))}}
+function syncNew(){
+  for(const k in REC){const r=REC[k];if(r.geom&&!FEAT[k])mk(r.cat,k,r.geom,{})}
+  for(const k in FEAT)if(k.startsWith('new-')&&!REC[k]){GRP[FEAT[k].c].removeLayer(FEAT[k].l);delete FEAT[k]}}
+async function refresh(){
+  const r=await api('/api/records');if(!r.ok)return;
+  REC=Object.fromEntries((await r.json()).map(x=>[x.key,x]));syncNew();restyle()}
+fetch('data/base.json').then(r=>r.json()).then(async b=>{
+  for(const c in b)for(const f of b[c].features)mk(c,f.properties.id,f.geometry,f.properties);
+  await refresh();setInterval(refresh,30000)});
+
+// ---- position de l'enquêteur
+let me,acc,first=true;
+map.locate({watch:true,enableHighAccuracy:true});
+map.on('locationfound',e=>{POS=e;
+  if(!me){me=L.circleMarker(e.latlng,{radius:9,color:'#fff',weight:3,fillColor:'#1a73e8',fillOpacity:1,interactive:false}).addTo(map);
+    acc=L.circle(e.latlng,{radius:e.accuracy,color:'#1a73e8',weight:1,fillOpacity:.1,interactive:false}).addTo(map)}
+  me.setLatLng(e.latlng);acc.setLatLng(e.latlng).setRadius(e.accuracy);
+  if(first){first=false;map.setView(e.latlng,17)}});
+map.on('locationerror',()=>{if(first){first=false;alert("Position GPS indisponible : autorisez la localisation dans le navigateur.")}});
+$('loc').onclick=()=>POS?map.setView(POS.latlng,18):alert('Position GPS en attente…');
+
+// ---- formulaire
+const sheet=$('sheet');
+const esc=s=>String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
+function input(f,v){
+  const a=`data-k="${f.k}"`;
+  if(f.t==='select')return `<select ${a}><option value="">—</option>${f.o.map(o=>`<option ${v===o?'selected':''}>${o}</option>`).join('')}</select>`;
+  if(f.t==='textarea')return `<textarea ${a} rows="2">${esc(v)}</textarea>`;
+  if(f.t==='dateinc')return `<input type="date" ${a} value="${v&&v!=='inconnue'?esc(v):''}"><label><input type="checkbox" data-inc="${f.k}" ${v==='inconnue'?'checked':''}> inconnue</label>`;
+  return `<input type="${f.t}" ${f.t==='number'?'step="any"':''} ${a} value="${esc(v)}">`}
+function close(){sheet.style.display='none';sheet.innerHTML='';if(window.tmp){map.removeLayer(tmp);tmp=null}}
+function openForm(c,key,base,isNew,geom){
+  const r=REC[key],v={...(r?r.props:{})};
+  if(!v.nom&&base.nom)v.nom=base.nom;
+  if(!v.agent)v.agent=localStorage.agent||'';
+  const sub=base.type?` <small>(base : ${esc(base.type)})</small>`:'';
+  sheet.innerHTML=`<h3 style="margin:0;color:${CATS[c][1]}">${CATS[c][0]}${sub}${isNew?' – nouvelle':''}</h3>
+   <label>Nom de l'agent enquêteur *</label><input data-k="agent" value="${esc(v.agent)}">
+   <label>Arrondissement</label><select data-k="arrondissement"><option value="">—</option>${[...Array(13)].map((_,i)=>`<option ${v.arrondissement==i+1?'selected':''}>${i+1}</option>`).join('')}</select>
+   <label>Quartier</label><div id="qslot"></div>
+   ${FIELDS[c].map(f=>`<label>${f.l}</label>${input(f,v[f.k])}`).join('')}
+   <label>Photographie de l'infrastructure * (prise de vue)</label>
+   <input type="file" id="ph" accept="image/*" capture="environment">
+   <img id="prev" ${r&&r.has_photo?`src="/api/photo/${encodeURIComponent(key)}?t=${Date.now()}"`:'hidden'}>
+   <div class="row"><button id="ok">Enregistrer</button><button class="g" id="no">Annuler</button>${isNew&&r?'<button class="r" id="del">Supprimer</button>':''}</div>`;
+  sheet.style.display='block';
+  const q=()=>{const a=sheet.querySelector('[data-k=arrondissement]').value,l=Q[a]||[],cur=$('qslot').querySelector('[data-k=quartier]')?.value??v.quartier;
+    $('qslot').innerHTML=l.length?`<select data-k="quartier"><option value="">—</option>${l.map(o=>`<option ${cur===o?'selected':''}>${esc(o)}</option>`).join('')}</select>`:`<input data-k="quartier" value="${esc(cur)}">`};
+  q();sheet.querySelector('[data-k=arrondissement]').onchange=q;
+  let photo=null;
+  $('ph').onchange=async e=>{const f=e.target.files[0];if(!f)return;photo=await shrink(f);$('prev').src=photo;$('prev').hidden=false};
+  $('no').onclick=close;
+  if($('del'))$('del').onclick=async()=>{if(confirm('Supprimer cette infrastructure ?')){await api('/api/records/'+key,{method:'DELETE'});close();refresh()}};
+  $('ok').onclick=async()=>{
+    const props={};
+    sheet.querySelectorAll('[data-k]').forEach(el=>{props[el.dataset.k]=el.value});
+    sheet.querySelectorAll('[data-inc]').forEach(el=>{if(el.checked)props[el.dataset.inc]='inconnue'});
+    if(!props.agent.trim())return alert("Indiquez le nom de l'agent.");
+    if(!photo&&!(r&&r.has_photo))return alert('La photo est obligatoire.');
+    localStorage.agent=props.agent;props.date_collecte=new Date().toISOString();
+    if(POS){props.gps_lat=+POS.latlng.lat.toFixed(6);props.gps_lon=+POS.latlng.lng.toFixed(6);props.gps_prec_m=Math.round(POS.accuracy)}
+    $('ok').disabled=true;$('ok').textContent='Envoi…';
+    const res=await api('/api/records',{method:'POST',body:JSON.stringify({key,cat:c,props,photo,geom:isNew&&!r?geom:undefined})});
+    if(!res.ok){alert("Échec de l'enregistrement, réessayez.");$('ok').disabled=false;$('ok').textContent='Enregistrer';return}
+    close();refresh()}}
+async function shrink(file){
+  const im=await createImageBitmap(file),s=Math.min(1,1000/Math.max(im.width,im.height)),c=document.createElement('canvas');
+  c.width=im.width*s;c.height=im.height*s;c.getContext('2d').drawImage(im,0,0,c.width,c.height);return c.toDataURL('image/jpeg',.7)}
+
+// ---- ajout d'une infrastructure
+$('add').onclick=()=>{
+  sheet.innerHTML=`<h3 style="margin:0">Ajouter une infrastructure</h3><label>Catégorie</label>
+   <select id="nc">${Object.entries(CATS).map(([k,v])=>`<option value="${k}">${v[0]}</option>`).join('')}</select>
+   <div class="row" id="nb"></div><div class="row"><button class="g" id="no">Annuler</button></div>`;
+  sheet.style.display='block';$('no').onclick=close;
+  const nb=()=>{const c=$('nc').value;$('nb').innerHTML=LINES.includes(c)?'<button id="t">✏️ Tracer sur la carte</button>'
+    :'<button id="g">📍 À ma position</button><button id="t">👆 Sur la carte</button>';
+    if($('g'))$('g').onclick=()=>{if(!POS)return alert('Position GPS en attente…');close();openForm(c,'new-'+crypto.randomUUID(),{},true,{type:'Point',coordinates:[POS.latlng.lng,POS.latlng.lat]})};
+    $('t').onclick=()=>{close();startPick(c)}};
+  $('nc').onchange=nb;nb()};
+function hint(t,ok){$('hint').style.display='flex';$('hintTxt').textContent=t;$('hintOk').style.display=ok?'':'none'}
+function endPick(){pending=null;$('hint').style.display='none';map.off('click',pick);if(window.tmp){map.removeLayer(tmp);tmp=null}}
+function startPick(c){
+  const line=LINES.includes(c);pending={c,pts:[]};window.tmp=null;
+  hint(line?'Touchez la carte pour poser les points de la ligne':'Touchez la carte à l\'emplacement',false);map.on('click',pick)}
+function pick(e){
+  const p=pending;p.pts.push(e.latlng);
+  if(!LINES.includes(p.c)){const g={type:'Point',coordinates:[e.latlng.lng,e.latlng.lat]},c=p.c;endPick();return openForm(c,'new-'+crypto.randomUUID(),{},true,g)}
+  if(window.tmp)map.removeLayer(tmp);tmp=L.polyline(p.pts,{color:'#000',dashArray:'6'}).addTo(map);hint(`${p.pts.length} point(s) posé(s)`,p.pts.length>1)}
+$('hintNo').onclick=endPick;
+$('hintOk').onclick=()=>{const p=pending,g={type:'LineString',coordinates:p.pts.map(x=>[x.lng,x.lat])};endPick();openForm(p.c,'new-'+crypto.randomUUID(),{},true,g)};
+
+// ---- export
+$('exp').onclick=()=>{
+  const u=f=>`/api/export?fmt=${f}&c=${encodeURIComponent(CODE)}`;
+  sheet.innerHTML=`<h3 style="margin:0">Base actualisée pour QGIS</h3><p>Chaque couche contient la base de départ + les fiches renseignées + les nouvelles infrastructures (champ <b>statut</b> : non_visite / verifie / nouveau).</p>
+   <div class="row"><button onclick="location.href='${u('gpkg')}'">GeoPackage (.gpkg)</button><button onclick="location.href='${u('zip')}'">Shapefiles (.zip)</button></div>
+   <div class="row"><button class="g" id="no">Fermer</button></div>`;
+  sheet.style.display='block';$('no').onclick=close};
+</script></body></html>

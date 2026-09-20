@@ -1,0 +1,7 @@
+flask
+flask-compress
+gunicorn
+psycopg[binary]
+geopandas
+pyogrio
+shapely
