@@ -38,30 +38,3 @@ Pas de mode hors-ligne (connexion requise) ; en cas de modification simultanée 
 
 
 
-Set up this Neon project in the current working directory.
-
-1. `npm i -g neon@latest && neon login`
-2. `neon skills -y`
-3. `neon mcp -y`
-4. `neon link --project-id soft-union-52427692 --branch production -y`
-5. `neon config init`
-6. Update `neon.ts`:
-
-```ts
-import { defineConfig } from "@neon/config/v1";
-
-export default defineConfig({
-  preview: {
-    buckets: {
-      cotonou: { access: "public_read" },
-    },
-  },
-});
-```
-
-7. `neon deploy`
-
-
-
-
-postgresql://neondb_owner:npg_izyTKa0lCJ8F@ep-divine-shadow-b5hfyyra-pooler.c-7.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require
